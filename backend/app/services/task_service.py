@@ -10,7 +10,8 @@ from typing import Any
 
 from app.core.logger import get_logger
 from app.services.image_analysis_service import ImageAnalysisService, get_image_analysis_service
-from app.services.kie_client import KieClient, get_kie_client
+from app.core.config import get_settings
+from app.services.kie_client import KieClient
 from app.services.prompt_builder_service import PromptBuilderService, get_prompt_builder_service
 
 logger = get_logger()
@@ -61,5 +62,5 @@ def get_task_service() -> TaskService:
     return TaskService(
         analysis_service=get_image_analysis_service(),
         prompt_service=get_prompt_builder_service(),
-        kie_client=get_kie_client(),
+        kie_client=KieClient(settings=get_settings()),
     )

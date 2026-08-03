@@ -1,21 +1,79 @@
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import { motion } from 'framer-motion'
-import { ArrowRight, Clapperboard } from 'lucide-react'
+import { AlertTriangle, LoaderCircle } from 'lucide-react'
+import {
+  GenerationSettings,
+  type GenerationSettingsValue,
+} from '@/components/GenerationSettings'
 import { ImageUploader } from '@/components/ImageUploader'
-import { PrimaryButton } from '@/components/PrimaryButton'
 import { SectionTitle } from '@/components/SectionTitle'
 import { useApp } from '@/context/AppContext'
+import { getModelById } from '@/data/models'
+import { persistActiveTask } from '@/lib/taskStorage'
 import { cn } from '@/lib/utils'
+import { API_BASE_URL, ApiError } from '@/services/api'
+import { uploadImages } from '@/services/upload'
+import { generateVideo } from '@/services/video'
+import type { GeneratorPhase } from '@/types'
 
 interface GeneratorFormValues {
   projectName: string
 }
 
+function phaseLabel(phase: GeneratorPhase): string {
+  switch (phase) {
+    case 'uploading':
+      return 'Uploading'
+    case 'generating_prompt':
+      return 'Generating Prompt'
+    case 'submitting_to_ai':
+      return 'Submitting'
+    case 'processing':
+      return 'Processing'
+    default:
+      return 'Generate Video'
+  }
+}
+
 export function VideoGeneratorPage() {
   const navigate = useNavigate()
-  const { images, projectName, setProjectName, setIsGenerating, setGenerationCancelled } = useApp()
+  const { images, projectName, setProjectName, clearImages, setActiveTaskId } = useApp()
+  const [phase, setPhase] = useState<GeneratorPhase>('idle')
+  const [error, setError] = useState<string | null>(null)
+  const [devPrompt, setDevPrompt] = useState<string | null>(null)
+  const [developmentMode, setDevelopmentMode] = useState(false)
+  const [settings, setSettings] = useState<GenerationSettingsValue | null>(null)
+
+  const estimatedCredits = settings?.breakdown?.estimatedCredits ?? 0
+  const availableCredits = settings?.availableCredits ?? null
+  const hasEnoughCredits = settings?.hasEnoughCredits ?? false
+  const creditsKnown = availableCredits !== null
   const canGenerate = images.length >= 1
+  const isBusy = phase !== 'idle'
+  const blockedByCredits = !developmentMode && creditsKnown && !hasEnoughCredits
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/health`)
+        if (!response.ok) return
+        const body = (await response.json()) as {
+          data?: { development_mode?: boolean }
+        }
+        if (!cancelled) {
+          setDevelopmentMode(Boolean(body.data?.development_mode))
+        }
+      } catch {
+        // Keep production defaults if health is unavailable.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const {
     register,
@@ -25,12 +83,60 @@ export function VideoGeneratorPage() {
     defaultValues: { projectName },
   })
 
-  const onSubmit = (values: GeneratorFormValues) => {
-    if (!canGenerate) return
-    setProjectName(values.projectName.trim())
-    setGenerationCancelled(false)
-    setIsGenerating(true)
-    navigate('/progress')
+  const onSubmit = async (values: GeneratorFormValues) => {
+    if (!canGenerate || isBusy || blockedByCredits) return
+
+    const trimmedName = values.projectName.trim()
+    setProjectName(trimmedName)
+    setError(null)
+    setDevPrompt(null)
+
+    try {
+      setPhase('uploading')
+      const uploadResult = await uploadImages(images.map((image) => image.file))
+      const imagePaths = uploadResult.files.map((file) => file.url)
+      if (imagePaths.length === 0) {
+        throw new ApiError('Upload failed: no files returned.', 502, 'upload_failed')
+      }
+
+      const model = settings ? getModelById(settings.modelId) : undefined
+
+      setPhase('generating_prompt')
+      const generationPromise = generateVideo({
+        image_paths: imagePaths,
+        project_name: trimmedName || undefined,
+        model_id: settings?.modelId,
+        api_model: model?.apiModel,
+        resolution: settings?.resolutionId,
+        duration_seconds: settings?.durationSeconds,
+        estimated_credits: settings?.breakdown?.estimatedCredits,
+      })
+      setPhase(developmentMode ? 'generating_prompt' : 'submitting_to_ai')
+      const generation = await generationPromise
+
+      if (generation.development_mode) {
+        setDevPrompt(generation.generated_prompt || generation.prompt || '')
+        setPhase('idle')
+        return
+      }
+
+      if (!generation.task_id) {
+        throw new ApiError('Generation did not return a task id.', 502, 'missing_task_id')
+      }
+
+      setPhase('processing')
+      persistActiveTask(generation.task_id, trimmedName)
+      setActiveTaskId(generation.task_id)
+      clearImages()
+      navigate('/progress', { state: { taskId: generation.task_id } })
+    } catch (err) {
+      const message =
+        err instanceof ApiError
+          ? err.message
+          : 'Something went wrong while starting generation.'
+      setError(message)
+      setPhase('idle')
+    }
   }
 
   return (
@@ -39,15 +145,15 @@ export function VideoGeneratorPage() {
         align="left"
         eyebrow="Video Generator"
         title="Upload references. Generate cinema."
-        description="Add 1–10 product images. Lumina will analyze them locally and walk you through a simulated generation pipeline."
+        description="Add 1–10 product images. Lumina will analyze them, generate a cinematic prompt, and submit your film to the AI renderer."
         className="mx-0 max-w-2xl"
       />
 
       <motion.form
         onSubmit={handleSubmit(onSubmit)}
-        initial={{ opacity: 0, y: 18 }}
+        initial={{ opacity: 0, y: 16 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.45, delay: 0.1 }}
+        transition={{ duration: 0.3, delay: 0.05 }}
         className="mt-10 space-y-6"
       >
         <div className="rounded-2xl border border-line bg-white/80 p-4 shadow-soft sm:p-5">
@@ -59,8 +165,9 @@ export function VideoGeneratorPage() {
             id="projectName"
             type="text"
             placeholder="Ceramic vase launch film"
+            disabled={isBusy}
             className={cn(
-              'mt-3 h-11 w-full rounded-xl border bg-white px-3.5 text-sm text-ink outline-none transition placeholder:text-mute/70',
+              'mt-3 h-11 w-full rounded-xl border bg-white px-3.5 text-sm text-ink outline-none transition duration-200 placeholder:text-mute/70',
               errors.projectName
                 ? 'border-danger focus:ring-2 focus:ring-danger/20'
                 : 'border-line focus:border-accent/50 focus:ring-2 focus:ring-accent/15',
@@ -74,33 +181,82 @@ export function VideoGeneratorPage() {
           ) : null}
         </div>
 
-        <ImageUploader />
+        <ImageUploader disabled={isBusy} />
 
-        <div className="flex flex-col gap-3 rounded-2xl border border-line bg-white/80 p-4 shadow-soft sm:flex-row sm:items-center sm:justify-between sm:p-5">
-          <div className="flex items-start gap-3">
-            <span className="mt-0.5 flex h-10 w-10 items-center justify-center rounded-xl bg-ink text-white">
-              <Clapperboard className="h-4 w-4" />
-            </span>
-            <div>
-              <p className="text-sm font-semibold text-ink">Ready when you are</p>
-              <p className="text-xs text-mute">
-                {canGenerate
-                  ? `${images.length} reference${images.length > 1 ? 's' : ''} selected for generation.`
-                  : 'Upload at least one image to enable generation.'}
-              </p>
-            </div>
-          </div>
+        <GenerationSettings disabled={isBusy} onChange={setSettings} />
 
-          <PrimaryButton
+        <div className="space-y-3">
+          <motion.button
             type="submit"
-            size="lg"
-            variant="accent"
-            disabled={!canGenerate}
-            className="w-full sm:w-auto"
+            disabled={!canGenerate || isBusy || blockedByCredits}
+            whileHover={
+              !canGenerate || isBusy || blockedByCredits ? undefined : { y: -2 }
+            }
+            whileTap={
+              !canGenerate || isBusy || blockedByCredits ? undefined : { scale: 0.99 }
+            }
+            transition={{ duration: 0.2 }}
+            className={cn(
+              'flex w-full items-center justify-center gap-3 rounded-2xl bg-accent px-6 py-4 text-white shadow-soft transition duration-200',
+              'hover:bg-accent-strong hover:shadow-lift',
+              'disabled:pointer-events-none disabled:opacity-45',
+            )}
           >
-            Generate Video
-            <ArrowRight className="h-4 w-4" />
-          </PrimaryButton>
+            {isBusy ? (
+              <>
+                <LoaderCircle className="h-5 w-5 animate-spin" />
+                <span className="font-display text-lg font-semibold tracking-tight">
+                  {phaseLabel(phase)}
+                </span>
+              </>
+            ) : (
+              <span className="flex flex-col items-center leading-tight">
+                <span className="font-display text-lg font-semibold tracking-tight">
+                  Generate Video
+                </span>
+                <span className="mt-1 text-xs font-medium text-white/80">
+                  Estimated Cost · {estimatedCredits} Credits
+                </span>
+              </span>
+            )}
+          </motion.button>
+
+          {!canGenerate && !isBusy ? (
+            <p className="text-center text-xs text-mute">
+              Upload at least one image to enable generation.
+            </p>
+          ) : null}
+
+          {blockedByCredits && !isBusy ? (
+            <p className="flex items-start justify-center gap-1.5 text-center text-xs text-danger">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>
+                You need {estimatedCredits} credits. Current balance {availableCredits}.
+              </span>
+            </p>
+          ) : null}
+
+          {error ? (
+            <p className="flex items-start justify-center gap-1.5 text-center text-xs text-danger">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>{error}</span>
+            </p>
+          ) : null}
+
+          {developmentMode && !isBusy ? (
+            <p className="text-center text-xs text-mute">
+              Development Mode is on — prompts are generated without calling Kie.ai.
+            </p>
+          ) : null}
+
+          {devPrompt ? (
+            <div className="rounded-2xl border border-line bg-white/80 p-4 text-left shadow-soft">
+              <p className="text-xs font-semibold uppercase tracking-wide text-mute">
+                Development prompt preview
+              </p>
+              <p className="mt-2 text-sm leading-relaxed text-ink">{devPrompt}</p>
+            </div>
+          ) : null}
         </div>
       </motion.form>
     </div>

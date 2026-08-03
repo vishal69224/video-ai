@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import { Link, NavLink } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
-import { Menu, Sparkles, X } from 'lucide-react'
+import { Coins, Menu, Sparkles, X } from 'lucide-react'
 import { PrimaryButton } from '@/components/PrimaryButton'
+import { useKieCredits } from '@/hooks/useKieCredits'
 import { cn } from '@/lib/utils'
 
 const NAV_ITEMS = [
@@ -11,8 +12,19 @@ const NAV_ITEMS = [
   { to: '/library', label: 'Library' },
 ]
 
+function formatCredits(value: number): string {
+  return new Intl.NumberFormat('en-US').format(value)
+}
+
 export function Header() {
   const [open, setOpen] = useState(false)
+  const { credits, loading, error, refresh } = useKieCredits()
+
+  const creditsLabel = loading
+    ? 'Credits…'
+    : error
+      ? 'Credits —'
+      : `Credits ${formatCredits(credits ?? 0)}`
 
   return (
     <header className="sticky top-0 z-40 border-b border-line/70">
@@ -45,7 +57,20 @@ export function Header() {
             ))}
           </nav>
 
-          <div className="hidden md:block">
+          <div className="hidden items-center gap-2 md:flex">
+            <button
+              type="button"
+              onClick={() => void refresh(true)}
+              title={
+                error
+                  ? `${error} Click to retry.`
+                  : 'Kie.ai credits'
+              }
+              className="inline-flex h-9 items-center gap-1.5 rounded-xl border border-line bg-white px-3 text-sm font-medium text-ink shadow-soft transition hover:border-accent/40"
+            >
+              <Coins className="h-3.5 w-3.5 text-accent" />
+              {creditsLabel}
+            </button>
             <PrimaryButton asChild size="sm" variant="accent">
               <Link to="/generate">Generate Video</Link>
             </PrimaryButton>
@@ -87,6 +112,14 @@ export function Header() {
                   {item.label}
                 </NavLink>
               ))}
+              <button
+                type="button"
+                onClick={() => void refresh(true)}
+                className="mt-1 inline-flex h-11 items-center justify-center gap-1.5 rounded-xl border border-line bg-white px-3 text-sm font-medium text-ink"
+              >
+                <Coins className="h-3.5 w-3.5 text-accent" />
+                {creditsLabel}
+              </button>
               <PrimaryButton asChild className="mt-2 w-full" variant="accent">
                 <Link to="/generate" onClick={() => setOpen(false)}>
                   Generate Video

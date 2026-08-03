@@ -6,8 +6,7 @@ import {
   useState,
   type ReactNode,
 } from 'react'
-import { MOCK_VIDEOS } from '@/lib/mockData'
-import type { LibraryVideo, UploadedImage } from '@/types'
+import type { UploadedImage } from '@/types'
 
 interface AppContextValue {
   images: UploadedImage[]
@@ -17,13 +16,8 @@ interface AppContextValue {
   clearImages: () => void
   projectName: string
   setProjectName: (name: string) => void
-  videos: LibraryVideo[]
-  addVideo: (video: LibraryVideo) => void
-  removeVideo: (id: string) => void
-  isGenerating: boolean
-  setIsGenerating: (value: boolean) => void
-  generationCancelled: boolean
-  setGenerationCancelled: (value: boolean) => void
+  activeTaskId: string | null
+  setActiveTaskId: (taskId: string | null) => void
 }
 
 const AppContext = createContext<AppContextValue | null>(null)
@@ -31,9 +25,7 @@ const AppContext = createContext<AppContextValue | null>(null)
 export function AppProvider({ children }: { children: ReactNode }) {
   const [images, setImagesState] = useState<UploadedImage[]>([])
   const [projectName, setProjectName] = useState('')
-  const [videos, setVideos] = useState<LibraryVideo[]>(MOCK_VIDEOS)
-  const [isGenerating, setIsGenerating] = useState(false)
-  const [generationCancelled, setGenerationCancelled] = useState(false)
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null)
 
   const setImages = useCallback((next: UploadedImage[]) => {
     setImagesState((prev) => {
@@ -74,14 +66,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     })
   }, [])
 
-  const addVideo = useCallback((video: LibraryVideo) => {
-    setVideos((prev) => [video, ...prev])
-  }, [])
-
-  const removeVideo = useCallback((id: string) => {
-    setVideos((prev) => prev.filter((video) => video.id !== id))
-  }, [])
-
   const value = useMemo(
     () => ({
       images,
@@ -91,13 +75,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       clearImages,
       projectName,
       setProjectName,
-      videos,
-      addVideo,
-      removeVideo,
-      isGenerating,
-      setIsGenerating,
-      generationCancelled,
-      setGenerationCancelled,
+      activeTaskId,
+      setActiveTaskId,
     }),
     [
       images,
@@ -106,11 +85,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       removeImage,
       clearImages,
       projectName,
-      videos,
-      addVideo,
-      removeVideo,
-      isGenerating,
-      generationCancelled,
+      activeTaskId,
     ],
   )
 

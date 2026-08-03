@@ -1,11 +1,11 @@
-"""Health and task-status endpoints."""
+"""Health and account endpoints."""
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends
 
 from app.core.config import Settings, get_settings
 from app.core.logger import get_logger
-from app.schemas.response_schema import StatusResponse
-from app.services.task_service import TaskService, get_task_service
+from app.schemas.response_schema import CreditsResponse, StatusResponse
+from app.services.kie_client import KieClient, get_kie_client
 
 router = APIRouter(prefix="/api", tags=["Status"])
 logger = get_logger()
@@ -24,35 +24,25 @@ async def health_check(settings: Settings = Depends(get_settings)) -> StatusResp
         data={
             "app_name": settings.APP_NAME,
             "debug": settings.DEBUG,
+            "development_mode": bool(settings.DEVELOPMENT_MODE),
+            "kie_configured": bool(settings.KIE_API_KEY.strip()),
         },
     )
 
 
 @router.get(
-    "/status/{task_id}",
-    response_model=StatusResponse,
-    summary="Get generation task status (not implemented)",
+    "/credits",
+    response_model=CreditsResponse,
+    summary="Get Kie.ai credit balance",
 )
-async def get_task_status(
-    task_id: str,
-    task_service: TaskService = Depends(get_task_service),
-) -> StatusResponse:
-    """
-    Poll a generation task by ID.
-
-    TODO: Return normalized provider status once TaskService is implemented.
-    """
-    logger.info("GET /api/status/{} called", task_id)
-    try:
-        task = await task_service.get_task(task_id)
-    except NotImplementedError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail=str(exc),
-        ) from exc
-
-    return StatusResponse(
+async def get_credits(
+    kie_client: KieClient = Depends(get_kie_client),
+) -> CreditsResponse:
+    """Return the current remaining Kie.ai account credits."""
+    logger.info("GET /api/credits called")
+    credits = await kie_client.get_credits()
+    return CreditsResponse(
         success=True,
-        message="Task status retrieved",
-        data=task,
+        credits=credits,
+        message="Credits retrieved successfully.",
     )

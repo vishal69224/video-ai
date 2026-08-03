@@ -95,11 +95,11 @@ const FAQS = [
   },
   {
     q: 'Is this connected to a real video API?',
-    a: 'This is a frontend-only experience. Generation progress and library videos are simulated with local React state for a production-quality UI demo.',
+    a: 'Yes. Lumina uploads your images to the backend, generates a cinematic prompt, submits an Image-to-Video job, and polls live status until your MP4 is ready.',
   },
   {
     q: 'Can I cancel a generation?',
-    a: 'Yes. On the progress screen you can cancel at any time and return to the generator without losing your uploaded images.',
+    a: 'Yes. On the progress screen you can leave at any time and return to the generator, or open the library to check finished videos later.',
   },
 ]
 

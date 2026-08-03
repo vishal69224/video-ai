@@ -21,15 +21,16 @@ function createUploadedImage(file: File): UploadedImage {
   }
 }
 
-export function useImageUpload() {
+export function useImageUpload(options?: { disabled?: boolean }) {
   const { images, addImages, removeImage } = useApp()
+  const disabled = Boolean(options?.disabled)
 
   const onDrop = useCallback(
     (acceptedFiles: File[], _rejections: FileRejection[]) => {
-      if (!acceptedFiles.length) return
+      if (disabled || !acceptedFiles.length) return
       addImages(acceptedFiles.map(createUploadedImage))
     },
-    [addImages],
+    [addImages, disabled],
   )
 
   const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
@@ -39,7 +40,7 @@ export function useImageUpload() {
     maxFiles: MAX_IMAGES,
     noClick: false,
     noKeyboard: false,
-    disabled: images.length >= MAX_IMAGES,
+    disabled: disabled || images.length >= MAX_IMAGES,
   })
 
   const canGenerate = images.length >= 1

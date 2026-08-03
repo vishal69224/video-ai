@@ -21,6 +21,15 @@ class StatusResponse(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
 
 
+class CreditsResponse(BaseModel):
+    """Kie.ai remaining credit balance."""
+
+    success: bool = True
+    credits: int
+    message: str = "Credits retrieved successfully."
+
+
+
 class VideoGenerateRequest(BaseModel):
     """
     Placeholder request body for future video generation.

@@ -63,7 +63,7 @@ class VideoGenerationService:
         api_model: str | None = None,
         resolution: str | None = None,
         duration_seconds: int | None = None,
-        estimated_credits: int | None = None,
+        estimated_credits: float | None = None,
     ) -> VideoGenerationResponse:
         """
         Validate images → generate prompt → (dev stop | validate → Kie.ai).
@@ -82,6 +82,7 @@ class VideoGenerationService:
         if self.settings.DEVELOPMENT_MODE:
             return await self._generate_development(
                 image_paths,
+                model_id=model_id,
                 api_model=api_model,
                 resolution=resolution,
                 duration_seconds=duration_seconds,
@@ -91,6 +92,7 @@ class VideoGenerationService:
         return await self._generate_production(
             image_paths,
             project_name=project_name,
+            model_id=model_id,
             api_model=api_model,
             resolution=resolution,
             duration_seconds=duration_seconds,
@@ -104,7 +106,7 @@ class VideoGenerationService:
         api_model: str | None = None,
         resolution: str | None = None,
         duration_seconds: int | None = None,
-        estimated_credits: int | None = None,
+        estimated_credits: float | None = None,
     ) -> dict[str, Any]:
         """
         Credit-safe preview: Gemma prompt + validation only. Never calls Kie.ai.
@@ -126,6 +128,7 @@ class VideoGenerationService:
             resolution=resolved_resolution,
             duration_seconds=seconds,
             client_estimate=estimated_credits,
+            model_ui_id=None,
         )
 
         checks = self.validation_service.validate_prompt_and_settings(
@@ -161,10 +164,11 @@ class VideoGenerationService:
         self,
         image_paths: list[str],
         *,
+        model_id: str | None,
         api_model: str | None,
         resolution: str | None,
         duration_seconds: int | None,
-        estimated_credits: int | None,
+        estimated_credits: float | None,
     ) -> VideoGenerationResponse:
         """Upload → Gemma → validate → return prompt. Never call Kie.ai."""
         logger.info("Development Mode active — stopping before Kie.ai (no credits used)")
@@ -189,6 +193,7 @@ class VideoGenerationService:
             resolution=resolved_resolution,
             duration_seconds=seconds,
             client_estimate=estimated_credits,
+            model_ui_id=model_id,
         )
 
         checks = self.validation_service.validate_prompt_and_settings(
@@ -224,17 +229,31 @@ class VideoGenerationService:
         image_paths: list[str],
         *,
         project_name: str | None,
+        model_id: str | None,
         api_model: str | None,
         resolution: str | None,
         duration_seconds: int | None,
-        estimated_credits: int | None,
+        estimated_credits: float | None,
     ) -> VideoGenerationResponse:
         """Full production pipeline including Kie.ai + MongoDB persistence."""
         logger.info("Production Mode active — Kie.ai submission enabled")
 
         title = (project_name or "").strip() or "Product Film"
-        display_duration = self._format_duration(duration_seconds)
-        display_resolution = self._format_resolution(resolution)
+        resolved_model = self.validation_service.resolve_model(api_model)
+        resolved_resolution = self.validation_service.resolve_resolution(resolution)
+        resolved_seconds = self.validation_service.resolve_duration_seconds(
+            duration_seconds
+        )
+        # Always price from the centralized table before any Kie call.
+        table_credits = self.validation_service.estimate_credits(
+            model=resolved_model,
+            resolution=resolved_resolution,
+            duration_seconds=resolved_seconds,
+            client_estimate=estimated_credits,
+            model_ui_id=model_id,
+        )
+        display_duration = self._format_duration(resolved_seconds)
+        display_resolution = self._format_resolution(resolved_resolution)
         pending_task_id = f"pending-{uuid4()}"
         video_store.create(
             task_id=pending_task_id,
@@ -247,8 +266,8 @@ class VideoGenerationService:
             progress=STAGE_PROGRESS["queued"],
             duration=display_duration,
             resolution=display_resolution,
-            model=(api_model or self.settings.KIE_MODEL or "").strip() or None,
-            credits_used=estimated_credits,
+            model=resolved_model,
+            credits_used=table_credits,
         )
 
         try:
@@ -272,11 +291,6 @@ class VideoGenerationService:
                 progress=STAGE_PROGRESS["generating_prompt"],
             )
             logger.info("Prompt generation started")
-            resolved_model = self.validation_service.resolve_model(api_model)
-            resolved_resolution = self.validation_service.resolve_resolution(resolution)
-            resolved_seconds = self.validation_service.resolve_duration_seconds(
-                duration_seconds
-            )
             try:
                 prompt = await self.prompt_service.generate_prompt(
                     validated_paths,
@@ -455,7 +469,26 @@ class VideoGenerationService:
             updated.status == "completed"
             and (updated.video_url or "").strip()
         ):
-            credits = self._extract_credits_used(remote)
+            actual_credits = self._extract_credits_used(remote)
+            expected_credits = updated.credits_used
+            # Prefer Kie.ai-reported credits whenever present.
+            credits = (
+                actual_credits if actual_credits is not None else expected_credits
+            )
+            if (
+                expected_credits is not None
+                and actual_credits is not None
+                and abs(float(expected_credits) - float(actual_credits)) > 1e-6
+            ):
+                logger.warning(
+                    "CREDIT MISMATCH model={} resolution={} duration={} "
+                    "expected_credits={} actual_credits={}",
+                    updated.model,
+                    updated.resolution,
+                    updated.duration,
+                    expected_credits,
+                    actual_credits,
+                )
             if credits is not None:
                 updated = (
                     video_store.update(task_id, credits_used=credits) or updated
@@ -540,11 +573,35 @@ class VideoGenerationService:
 
     @staticmethod
     def _extract_credits_used(remote: dict[str, Any]) -> int | None:
-        raw = remote.get("creditsConsumed") or remote.get("credits_consumed")
-        try:
+        # Prefer any cost field Kie.ai may return.
+        for key in (
+            "creditsConsumed",
+            "credits_consumed",
+            "consumeCredits",
+            "creditCost",
+            "credits",
+            "cost",
+        ):
+            raw = remote.get(key)
+            if raw is None and isinstance(remote.get("data"), dict):
+                raw = remote["data"].get(key)
             if raw is None:
-                return None
-            return int(raw)
+                continue
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    @staticmethod
+    def _parse_duration_seconds(value: str | int | None) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return value
+        text = str(value).strip().lower().rstrip("s")
+        try:
+            return int(float(text))
         except (TypeError, ValueError):
             return None
 

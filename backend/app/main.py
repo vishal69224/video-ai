@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse, ORJSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.api import pricing as pricing_router
 from app.api import prompt as prompt_router
 from app.api import status as status_router
 from app.api import upload as upload_router
@@ -118,6 +119,9 @@ def _error_status_for_code(code: str) -> int:
         "empty_response": status.HTTP_502_BAD_GATEWAY,
         "model_missing": status.HTTP_503_SERVICE_UNAVAILABLE,
         "ollama_unavailable": status.HTTP_503_SERVICE_UNAVAILABLE,
+        "provider_unavailable": status.HTTP_503_SERVICE_UNAVAILABLE,
+        "invalid_api_key": status.HTTP_401_UNAUTHORIZED,
+        "rate_limit": status.HTTP_429_TOO_MANY_REQUESTS,
         "generation_timeout": status.HTTP_504_GATEWAY_TIMEOUT,
         "prompt_generation_failed": status.HTTP_502_BAD_GATEWAY,
         "video_generation_failed": status.HTTP_502_BAD_GATEWAY,
@@ -244,6 +248,7 @@ app.include_router(upload_router.router)
 app.include_router(prompt_router.router)
 app.include_router(video_router.router)
 app.include_router(status_router.router)
+app.include_router(pricing_router.router)
 
 app.mount("/uploads", StaticFiles(directory=str(settings.upload_path)), name="uploads")
 app.mount("/static", StaticFiles(directory=str(settings.static_path)), name="static")

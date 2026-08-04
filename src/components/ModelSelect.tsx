@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Check, ChevronsUpDown, Search } from 'lucide-react'
-import type { AiModel } from '@/data/models'
+import { exampleCredits, formatCredits, type AiModel } from '@/data/models'
 import { cn } from '@/lib/utils'
 
 interface ModelSelectProps {
@@ -25,7 +25,7 @@ export function ModelSelect({ models, value, onChange, disabled = false }: Model
     const needle = query.trim().toLowerCase()
     if (!needle) return models
     return models.filter((model) =>
-      [model.name, model.provider, model.bestFor, model.description]
+      [model.name, model.best_for, model.description]
         .join(' ')
         .toLowerCase()
         .includes(needle),
@@ -66,7 +66,12 @@ export function ModelSelect({ models, value, onChange, disabled = false }: Model
             {selected ? displayName(selected.name) : 'Select model'}
           </p>
           <p className="mt-1 truncate text-xs text-mute">
-            {selected?.description} · {selected?.credits} Credits
+            {selected?.description}
+            {selected
+              ? exampleCredits(selected) != null
+                ? ` · ${formatCredits(exampleCredits(selected)!)} Credits`
+                : ' · Pricing unknown'
+              : ''}
           </p>
         </div>
         <ChevronsUpDown className="h-4 w-4 shrink-0 text-mute" />
@@ -123,7 +128,11 @@ export function ModelSelect({ models, value, onChange, disabled = false }: Model
                           <p className="mt-1 text-[11px] font-medium text-mute">
                             {model.provider}
                             <span className="mx-1.5 text-line">·</span>
-                            <span className="text-accent">{model.credits} Credits example</span>
+                            <span className="text-accent">
+                              {exampleCredits(model) != null
+                                ? `${formatCredits(exampleCredits(model)!)} Credits example`
+                                : 'Official pricing unknown'}
+                            </span>
                           </p>
                         </div>
                       </button>

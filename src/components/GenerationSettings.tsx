@@ -4,14 +4,18 @@ import { DurationSelect } from '@/components/DurationSelect'
 import { ModelSelect } from '@/components/ModelSelect'
 import { ResolutionSelect } from '@/components/ResolutionSelect'
 import {
-  AI_MODELS,
   DEFAULT_DURATION_SECONDS,
   DEFAULT_MODEL_ID,
   DEFAULT_RESOLUTION_ID,
   estimateCredits,
+  formatCredits,
+  getDefaultModelId,
   getDurationsForModel,
   getModelById,
   getResolutionsForModel,
+  getVisibleModels,
+  refreshPricingCatalog,
+  type AiModel,
   type CreditBreakdown,
   type ResolutionId,
 } from '@/data/models'
@@ -28,19 +32,43 @@ export interface GenerationSettingsValue {
 
 interface GenerationSettingsProps {
   disabled?: boolean
-  models?: typeof AI_MODELS
   onChange?: (value: GenerationSettingsValue) => void
 }
 
 export function GenerationSettings({
   disabled = false,
-  models = AI_MODELS,
   onChange,
 }: GenerationSettingsProps) {
   const { credits } = useKieCredits()
+  const [models, setModels] = useState<AiModel[]>([])
+  const [catalogError, setCatalogError] = useState<string | null>(null)
   const [modelId, setModelId] = useState(DEFAULT_MODEL_ID)
   const [resolutionId, setResolutionId] = useState<ResolutionId>(DEFAULT_RESOLUTION_ID)
   const [durationSeconds, setDurationSeconds] = useState(DEFAULT_DURATION_SECONDS)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const loaded = await refreshPricingCatalog()
+        if (cancelled) return
+        setModels(loaded)
+        setCatalogError(null)
+        const preferred = getDefaultModelId()
+        setModelId((current) =>
+          loaded.some((model) => model.id === current) ? current : preferred,
+        )
+      } catch {
+        if (!cancelled) {
+          setCatalogError('Could not load pricing catalog from the backend.')
+          setModels([])
+        }
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const model = useMemo(() => getModelById(modelId) ?? models[0], [modelId, models])
 
@@ -58,13 +86,13 @@ export function GenerationSettings({
     if (!model) return
     if (!resolutionOptions.some((option) => option.id === resolutionId)) {
       const fallback =
-        resolutionOptions.find((option) => option.id === DEFAULT_RESOLUTION_ID) ??
-        resolutionOptions[resolutionOptions.length - 1]
+        resolutionOptions.find((option) => option.id === model.default_resolution) ??
+        resolutionOptions[0]
       if (fallback) setResolutionId(fallback.id)
     }
     if (!durationOptions.some((option) => option.seconds === durationSeconds)) {
       const fallback =
-        durationOptions.find((option) => option.seconds === DEFAULT_DURATION_SECONDS) ??
+        durationOptions.find((option) => option.seconds === model.default_duration) ??
         durationOptions[0]
       if (fallback) setDurationSeconds(fallback.seconds)
     }
@@ -72,11 +100,14 @@ export function GenerationSettings({
 
   const breakdown = useMemo(
     () => estimateCredits(modelId, resolutionId, durationSeconds),
-    [modelId, resolutionId, durationSeconds],
+    [modelId, resolutionId, durationSeconds, models],
   )
 
   const hasEnoughCredits =
-    credits !== null && breakdown !== null && credits >= breakdown.estimatedCredits
+    credits !== null &&
+    breakdown !== null &&
+    typeof breakdown.estimatedCredits === 'number' &&
+    credits >= breakdown.estimatedCredits
 
   const onChangeRef = useRef(onChange)
   useEffect(() => {
@@ -108,16 +139,19 @@ export function GenerationSettings({
         <p className="mt-1 text-sm text-mute">
           Choose the AI model and output settings before generating your video.
         </p>
+        {catalogError ? (
+          <p className="mt-2 text-xs text-danger">{catalogError}</p>
+        ) : null}
       </div>
 
       <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
         <div className="sm:col-span-2 lg:col-span-1">
           <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-mute">AI Model</p>
           <ModelSelect
-            models={models}
+            models={models.length ? models : getVisibleModels()}
             value={model?.id ?? modelId}
             onChange={setModelId}
-            disabled={disabled}
+            disabled={disabled || models.length === 0}
           />
         </div>
 
@@ -127,7 +161,7 @@ export function GenerationSettings({
             options={resolutionOptions}
             value={resolutionId}
             onChange={(next) => setResolutionId(next as ResolutionId)}
-            disabled={disabled}
+            disabled={disabled || !model}
           />
         </div>
 
@@ -137,20 +171,20 @@ export function GenerationSettings({
             options={durationOptions}
             value={durationSeconds}
             onChange={setDurationSeconds}
-            disabled={disabled}
+            disabled={disabled || !model}
           />
         </div>
 
         <div className="rounded-xl border border-line bg-canvas/60 p-3.5">
           <p className="text-xs font-semibold uppercase tracking-wide text-mute">Estimated Cost</p>
           <p className="mt-2 font-display text-2xl font-semibold tracking-tight text-ink">
-            {breakdown?.estimatedCredits ?? 0}
+            {breakdown ? formatCredits(breakdown.estimatedCredits) : '—'}
             <span className="ml-1 text-sm font-semibold text-mute">Credits</span>
           </p>
           <p className="mt-1 text-xs text-mute">
             {breakdown
-              ? `${breakdown.estimatedCredits} credits · ${breakdown.resolutionLabel} · ${breakdown.durationSeconds}s`
-              : 'Select a model to estimate'}
+              ? `${formatCredits(breakdown.estimatedCredits)} · ${breakdown.creditsPerSecond}/s · ${breakdown.resolutionLabel} · ${breakdown.durationSeconds}s`
+              : 'Pricing unavailable for this model'}
           </p>
         </div>
       </div>

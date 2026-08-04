@@ -52,13 +52,29 @@ class Settings(BaseSettings):
     KIE_RESOLUTION: str = "1080p"
     KIE_DURATION: str = "5"
 
+    # Vision AI provider selection: "openrouter" | "ollama"
+    AI_PROVIDER: str = "openrouter"
+
     OLLAMA_MODEL: str = "gemma3:4b"
     OLLAMA_HOST: str = "http://127.0.0.1:11434"
     OLLAMA_TIMEOUT: float = 120.0
 
+    OPENROUTER_API_KEY: str = ""
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    OPENROUTER_MODEL: str = "google/gemma-4-26b-a4b-it:free"
+    OPENROUTER_TIMEOUT: float = 120.0
+
     # MongoDB — metadata only (no MP4 binaries).
     MONGODB_URI: str = "mongodb://127.0.0.1:27017"
     MONGODB_DB: str = "video_ai"
+
+    @property
+    def ai_timeout(self) -> float:
+        """Timeout for the active vision provider."""
+        provider = (self.AI_PROVIDER or "openrouter").strip().lower()
+        if provider == "ollama":
+            return float(self.OLLAMA_TIMEOUT)
+        return float(self.OPENROUTER_TIMEOUT)
 
     @field_validator("ALLOWED_EXTENSIONS", mode="before")
     @classmethod

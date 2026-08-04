@@ -17,7 +17,9 @@ class VideoGenerationRequest(BaseModel):
     api_model: str | None = Field(default=None, description="Provider model slug")
     resolution: str | None = Field(default=None, description="Requested output resolution")
     duration_seconds: int | None = Field(default=None, description="Requested clip duration")
-    estimated_credits: int | None = Field(default=None, description="Client-side credit estimate")
+    estimated_credits: float | None = Field(
+        default=None, description="Client-side credit estimate (cps × duration)"
+    )
 
 
 class VideoGenerationResponse(BaseModel):
@@ -35,7 +37,7 @@ class VideoGenerationResponse(BaseModel):
     estimated_model: str | None = None
     estimated_resolution: str | None = None
     estimated_duration: str | None = None
-    estimated_credits: int | None = None
+    estimated_credits: float | None = None
 
 
 class VideoStatusResponse(BaseModel):

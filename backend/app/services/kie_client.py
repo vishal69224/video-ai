@@ -50,7 +50,26 @@ V1_PRO_FAST_MODEL = "bytedance/v1-pro-fast-image-to-video"
 V1_PRO_FAST_RESOLUTIONS = {"720p", "1080p"}
 V1_PRO_FAST_DURATIONS = {5, 10}
 
+# Docs: https://docs.kie.ai/market/bytedance/v1-pro-image-to-video
+V1_PRO_MODEL = "bytedance/v1-pro-image-to-video"
+# Docs: https://docs.kie.ai/market/bytedance/v1-lite-image-to-video
+V1_LITE_MODEL = "bytedance/v1-lite-image-to-video"
+V1_PRO_LITE_RESOLUTIONS = {"480p", "720p", "1080p"}
+V1_PRO_LITE_DURATIONS = {5, 10}
+
+# Docs: https://docs.kie.ai/market/bytedance/seedance-1-5-pro
+SEEDANCE_15_PRO_MODEL = "bytedance/seedance-1.5-pro"
+SEEDANCE_15_PRO_RESOLUTIONS = {"480p", "720p", "1080p"}
+
 WAN_MODEL = "wan/2-7-image-to-video"
+
+SEEDANCE_I2V_MODELS = {
+    V1_PRO_MODEL,
+    V1_LITE_MODEL,
+    V1_PRO_FAST_MODEL,
+    SEEDANCE_15_PRO_MODEL,
+    *SEEDANCE_2_MODELS,
+}
 
 
 @dataclass
@@ -560,6 +579,15 @@ class KieClient:
             )
 
         requested_model = (model or self.settings.KIE_MODEL or "").strip()
+        if requested_model in {V1_PRO_MODEL, V1_LITE_MODEL}:
+            return self._build_v1_pro_lite_request(
+                model=requested_model,
+                prompt=prompt,
+                image_urls=image_urls,
+                resolution=resolution,
+                duration_seconds=duration_seconds,
+            )
+
         if requested_model == V1_PRO_FAST_MODEL:
             return self._build_v1_pro_fast_request(
                 prompt=prompt,
@@ -577,6 +605,14 @@ class KieClient:
                 duration_seconds=duration_seconds,
             )
 
+        if requested_model == SEEDANCE_15_PRO_MODEL:
+            return self._build_seedance15_request(
+                prompt=prompt,
+                image_urls=image_urls,
+                resolution=resolution,
+                duration_seconds=duration_seconds,
+            )
+
         if requested_model == WAN_MODEL:
             return self._build_wan_request(
                 prompt=prompt,
@@ -587,12 +623,13 @@ class KieClient:
 
         if requested_model:
             logger.warning(
-                "Unsupported Kie model '{}'; falling back to Seedance 1.0 Pro Fast.",
+                "Unsupported Kie model '{}'; falling back to Seedance 1.0 Pro.",
                 requested_model,
             )
 
-        # Default: market Seedance 1.0 Pro Fast (16 credits / 10s).
-        return self._build_v1_pro_fast_request(
+        # Default: Seedance 1.0 Pro (official documented credit rates).
+        return self._build_v1_pro_lite_request(
+            model=V1_PRO_MODEL,
             prompt=prompt,
             image_urls=image_urls,
             resolution=resolution or "720p",
@@ -631,6 +668,50 @@ class KieClient:
             "input": input_payload,
         }
 
+    def _build_v1_pro_lite_request(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        image_urls: list[str],
+        resolution: str | None,
+        duration_seconds: int | None,
+    ) -> tuple[str, dict[str, Any]]:
+        """
+        Official Seedance 1.0 Pro / Lite I2V body.
+
+        Docs:
+        - https://docs.kie.ai/market/bytedance/v1-pro-image-to-video
+        - https://docs.kie.ai/market/bytedance/v1-lite-image-to-video
+        """
+        raw_res = (resolution or "720p").strip().lower()
+        aliases = {"480": "480p", "720": "720p", "1080": "1080p"}
+        resolved_resolution = aliases.get(raw_res, raw_res)
+        if resolved_resolution not in V1_PRO_LITE_RESOLUTIONS:
+            resolved_resolution = "720p"
+
+        try:
+            seconds = int(str(duration_seconds if duration_seconds is not None else 5).strip())
+        except (TypeError, ValueError):
+            seconds = 5
+        if seconds not in V1_PRO_LITE_DURATIONS:
+            seconds = 10 if seconds >= 8 else 5
+
+        input_payload: dict[str, Any] = {
+            "prompt": prompt[:10000],
+            "image_url": image_urls[0],
+            "resolution": resolved_resolution,
+            "duration": str(seconds),
+        }
+        # Lite docs support optional end_image_url; credit impact unknown.
+        if model == V1_LITE_MODEL and len(image_urls) > 1:
+            input_payload["end_image_url"] = image_urls[-1]
+
+        return "/api/v1/jobs/createTask", {
+            "model": model,
+            "input": input_payload,
+        }
+
     def _build_v1_pro_fast_request(
         self,
         *,
@@ -643,7 +724,6 @@ class KieClient:
         Official Seedance 1.0 Pro Fast (V1 Pro Fast I2V) body.
 
         Docs: https://docs.kie.ai/market/bytedance/v1-pro-fast-image-to-video
-        Market pricing card: 16 Credits / 10s
         """
         raw_res = (resolution or "720p").strip().lower()
         resolved_resolution = "1080p" if raw_res in {"1080", "1080p"} else "720p"
@@ -664,6 +744,40 @@ class KieClient:
                 "image_url": image_urls[0],
                 "resolution": resolved_resolution,
                 "duration": str(seconds),
+            },
+        }
+
+    def _build_seedance15_request(
+        self,
+        *,
+        prompt: str,
+        image_urls: list[str],
+        resolution: str | None,
+        duration_seconds: int | None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Official Seedance 1.5 Pro createTask body."""
+        raw_res = (resolution or "720p").strip().lower()
+        aliases = {"480": "480p", "720": "720p", "1080": "1080p"}
+        resolved_resolution = aliases.get(raw_res, raw_res)
+        if resolved_resolution not in SEEDANCE_15_PRO_RESOLUTIONS:
+            resolved_resolution = "720p"
+
+        try:
+            seconds = int(str(duration_seconds if duration_seconds is not None else 8).strip())
+        except (TypeError, ValueError):
+            seconds = 8
+        seconds = max(4, min(12, seconds))
+
+        return "/api/v1/jobs/createTask", {
+            "model": SEEDANCE_15_PRO_MODEL,
+            "input": {
+                "prompt": prompt[:20000],
+                "input_urls": image_urls[:2],
+                "aspect_ratio": "9:16",
+                "resolution": resolved_resolution,
+                "duration": seconds,
+                "fixed_lens": False,
+                "generate_audio": False,
             },
         }
 

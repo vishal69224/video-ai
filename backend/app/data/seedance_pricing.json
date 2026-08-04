@@ -1,0 +1,141 @@
+{
+  "version": 3,
+  "formula": "credits = credits_per_second × duration",
+  "billing_mode": "image_to_video",
+  "models": [
+    {
+      "id": "seedance-1-pro",
+      "model_id": "bytedance/v1-pro-image-to-video",
+      "name": "Seedance 1.0 Pro",
+      "payload_family": "v1Pro",
+      "ui_visible": true,
+      "description": "Seedance 1.0 Pro Image-to-Video",
+      "best_for": "Cinematic multi-shot I2V",
+      "provider_mark": "BD",
+      "resolutions": ["480p", "720p", "1080p"],
+      "durations": [5, 10],
+      "duration_min": 5,
+      "duration_max": 10,
+      "default_resolution": "720p",
+      "default_duration": 5,
+      "credits_per_second": {
+        "480p": 2.8,
+        "720p": 6,
+        "1080p": 14
+      }
+    },
+    {
+      "id": "seedance-1-lite",
+      "model_id": "bytedance/v1-lite-image-to-video",
+      "name": "Seedance 1.0 Lite",
+      "payload_family": "v1Lite",
+      "ui_visible": true,
+      "description": "Seedance 1.0 Lite Image-to-Video",
+      "best_for": "Budget single-shot I2V",
+      "provider_mark": "BD",
+      "resolutions": ["480p", "720p", "1080p"],
+      "durations": [5, 10],
+      "duration_min": 5,
+      "duration_max": 10,
+      "default_resolution": "720p",
+      "default_duration": 5,
+      "credits_per_second": {
+        "480p": 2,
+        "720p": 4.5,
+        "1080p": 10
+      }
+    },
+    {
+      "id": "seedance-1-pro-fast",
+      "model_id": "bytedance/v1-pro-fast-image-to-video",
+      "name": "Seedance 1.0 Pro Fast",
+      "payload_family": "v1ProFast",
+      "ui_visible": true,
+      "description": "Seedance 1.0 Pro Fast Image-to-Video",
+      "best_for": "Fast Pro Motion",
+      "provider_mark": "BD",
+      "resolutions": ["720p", "1080p"],
+      "durations": [5, 10],
+      "duration_min": 5,
+      "duration_max": 10,
+      "default_resolution": "720p",
+      "default_duration": 5,
+      "credits_per_second": {}
+    },
+    {
+      "id": "seedance-2",
+      "model_id": "bytedance/seedance-2",
+      "name": "Seedance 2.0",
+      "payload_family": "seedance2",
+      "ui_visible": true,
+      "description": "Seedance 2.0 Image-to-Video",
+      "best_for": "Premium Cinematic Motion",
+      "provider_mark": "BD",
+      "resolutions": ["480p", "720p", "1080p", "4k"],
+      "durations": [5, 8, 10, 12, 15],
+      "duration_min": 4,
+      "duration_max": 15,
+      "default_resolution": "720p",
+      "default_duration": 5,
+      "credits_per_second": {}
+    },
+    {
+      "id": "seedance-2-fast",
+      "model_id": "bytedance/seedance-2-fast",
+      "name": "Seedance 2.0 Fast",
+      "payload_family": "seedance2",
+      "ui_visible": true,
+      "description": "Seedance 2.0 Fast Image-to-Video",
+      "best_for": "Fast Generation",
+      "provider_mark": "BD",
+      "resolutions": ["480p", "720p"],
+      "durations": [5, 8, 10, 12, 15],
+      "duration_min": 4,
+      "duration_max": 15,
+      "default_resolution": "720p",
+      "default_duration": 5,
+      "credits_per_second": {}
+    },
+    {
+      "id": "seedance-2-mini",
+      "model_id": "bytedance/seedance-2-mini",
+      "name": "Seedance 2.0 Mini",
+      "payload_family": "seedance2",
+      "ui_visible": true,
+      "description": "Seedance 2.0 Mini Image-to-Video",
+      "best_for": "Budget Drafts",
+      "provider_mark": "BD",
+      "resolutions": ["480p", "720p"],
+      "durations": [5, 8, 10, 12, 15],
+      "duration_min": 4,
+      "duration_max": 15,
+      "default_resolution": "720p",
+      "default_duration": 5,
+      "credits_per_second": {
+        "480p": 6,
+        "720p": 12.5
+      }
+    },
+    {
+      "id": "seedance-1-5-pro",
+      "model_id": "bytedance/seedance-1.5-pro",
+      "name": "Seedance 1.5 Pro",
+      "payload_family": "seedance15",
+      "ui_visible": true,
+      "description": "Seedance 1.5 Pro Image-to-Video",
+      "best_for": "1.5 Pro Campaigns",
+      "provider_mark": "BD",
+      "resolutions": ["480p", "720p", "1080p"],
+      "durations": [4, 5, 6, 7, 8, 9, 10, 11, 12],
+      "duration_min": 4,
+      "duration_max": 12,
+      "default_resolution": "720p",
+      "default_duration": 8,
+      "credits_per_second": {
+        "480p": 3.5,
+        "720p": 7,
+        "1080p": 15
+      }
+    }
+  ]
+}

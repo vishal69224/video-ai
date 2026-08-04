@@ -10,7 +10,7 @@ import {
 import { ImageUploader } from '@/components/ImageUploader'
 import { SectionTitle } from '@/components/SectionTitle'
 import { useApp } from '@/context/AppContext'
-import { getModelById } from '@/data/models'
+import { formatCredits, getModelById } from '@/data/models'
 import { persistActiveTask } from '@/lib/taskStorage'
 import { cn } from '@/lib/utils'
 import { API_BASE_URL, ApiError } from '@/services/api'
@@ -46,13 +46,16 @@ export function VideoGeneratorPage() {
   const [developmentMode, setDevelopmentMode] = useState(false)
   const [settings, setSettings] = useState<GenerationSettingsValue | null>(null)
 
-  const estimatedCredits = settings?.breakdown?.estimatedCredits ?? 0
+  const estimatedCredits = settings?.breakdown?.estimatedCredits
+  const pricingKnown = typeof estimatedCredits === 'number'
   const availableCredits = settings?.availableCredits ?? null
   const hasEnoughCredits = settings?.hasEnoughCredits ?? false
   const creditsKnown = availableCredits !== null
   const canGenerate = images.length >= 1
   const isBusy = phase !== 'idle'
-  const blockedByCredits = !developmentMode && creditsKnown && !hasEnoughCredits
+  const blockedByCredits =
+    !pricingKnown ||
+    (!developmentMode && creditsKnown && !hasEnoughCredits)
 
   useEffect(() => {
     let cancelled = false
@@ -106,7 +109,7 @@ export function VideoGeneratorPage() {
         image_paths: imagePaths,
         project_name: trimmedName || undefined,
         model_id: settings?.modelId,
-        api_model: model?.apiModel,
+        api_model: model?.model_id,
         resolution: settings?.resolutionId,
         duration_seconds: settings?.durationSeconds,
         estimated_credits: settings?.breakdown?.estimatedCredits,
@@ -210,13 +213,10 @@ export function VideoGeneratorPage() {
                 </span>
               </>
             ) : (
-              <span className="flex flex-col items-center leading-tight">
-                <span className="font-display text-lg font-semibold tracking-tight">
-                  Generate Video
-                </span>
-                <span className="mt-1 text-xs font-medium text-white/80">
-                  Estimated Cost · {estimatedCredits} Credits
-                </span>
+              <span className="font-display text-lg font-semibold tracking-tight">
+                {pricingKnown
+                  ? `Generate Video • ${formatCredits(estimatedCredits)} Credits`
+                  : 'Generate Video • Pricing unknown'}
               </span>
             )}
           </motion.button>
@@ -231,7 +231,9 @@ export function VideoGeneratorPage() {
             <p className="flex items-start justify-center gap-1.5 text-center text-xs text-danger">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <span>
-                You need {estimatedCredits} credits. Current balance {availableCredits}.
+                {!pricingKnown
+                  ? 'Pricing is not configured for this Seedance model yet. Choose a model with credits_per_second rates.'
+                  : `You need ${formatCredits(estimatedCredits!)} credits. Current balance ${availableCredits}.`}
               </span>
             </p>
           ) : null}

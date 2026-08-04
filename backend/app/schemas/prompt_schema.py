@@ -50,7 +50,7 @@ class PromptPreviewRequest(BaseModel):
     api_model: str | None = Field(default=None)
     resolution: str | None = Field(default=None)
     duration_seconds: int | None = Field(default=None)
-    estimated_credits: int | None = Field(default=None)
+    estimated_credits: float | None = Field(default=None)
 
 
 class PromptPreviewResponse(BaseModel):
@@ -62,6 +62,6 @@ class PromptPreviewResponse(BaseModel):
     estimated_model: str
     estimated_resolution: str
     estimated_duration: str
-    estimated_credits: int
+    estimated_credits: float
     validation: dict[str, Any]
     message: str = "Prompt preview completed. Kie.ai was not called."

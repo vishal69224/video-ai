@@ -14,12 +14,22 @@ from app.core.config import Settings, get_settings
 from app.core.exceptions import VideoGenerationError
 from app.core.logger import get_logger
 from app.services.kie_client import (
+    SEEDANCE_15_PRO_MODEL,
+    SEEDANCE_15_PRO_RESOLUTIONS,
     SEEDANCE_2_MODELS,
     SEEDANCE_2_RESOLUTIONS,
+    SEEDANCE_I2V_MODELS,
+    V1_LITE_MODEL,
     V1_PRO_FAST_DURATIONS,
     V1_PRO_FAST_MODEL,
     V1_PRO_FAST_RESOLUTIONS,
-    WAN_MODEL,
+    V1_PRO_LITE_DURATIONS,
+    V1_PRO_LITE_RESOLUTIONS,
+    V1_PRO_MODEL,
+)
+from app.services.seedance_pricing_engine import (
+    SeedancePricingEngine,
+    get_seedance_pricing_engine,
 )
 
 logger = get_logger()
@@ -27,11 +37,7 @@ logger = get_logger()
 MIN_PROMPT_LENGTH = 40
 MAX_PROMPT_LENGTH = 10_000
 
-SUPPORTED_MODELS = {
-    V1_PRO_FAST_MODEL,
-    WAN_MODEL,
-    *SEEDANCE_2_MODELS,
-}
+SUPPORTED_MODELS = set(SEEDANCE_I2V_MODELS)
 
 
 @dataclass(frozen=True)
@@ -46,6 +52,7 @@ class GenerationValidationService:
     """Validates prompt + generation settings before any Kie.ai call."""
 
     settings: Settings
+    pricing: SeedancePricingEngine
 
     def validate_prompt_and_settings(
         self,
@@ -84,7 +91,7 @@ class GenerationValidationService:
         )
 
     def resolve_model(self, api_model: str | None) -> str:
-        return (api_model or self.settings.KIE_MODEL or V1_PRO_FAST_MODEL).strip()
+        return (api_model or self.settings.KIE_MODEL or V1_PRO_MODEL).strip()
 
     def resolve_resolution(self, resolution: str | None) -> str:
         raw = (resolution or self.settings.KIE_RESOLUTION or "720p").strip().lower()
@@ -115,27 +122,52 @@ class GenerationValidationService:
         model: str,
         resolution: str,
         duration_seconds: int,
-        client_estimate: int | None = None,
-    ) -> int:
-        """Prefer client estimate; otherwise apply a conservative local estimate."""
-        if client_estimate is not None:
-            try:
-                value = int(client_estimate)
-                if value >= 0:
-                    return value
-            except (TypeError, ValueError):
-                pass
+        client_estimate: float | int | None = None,
+        model_ui_id: str | None = None,
+    ) -> float:
+        """
+        Always calculate from SeedancePricingEngine:
+        credits = credits_per_second × duration_seconds
 
-        # Rough Market-style fallbacks used only when the client omits an estimate.
-        if model == V1_PRO_FAST_MODEL:
-            base = 16 if duration_seconds >= 10 else 8
-            return base + (4 if resolution == "1080p" else 0)
-        if model in SEEDANCE_2_MODELS:
-            per_second = 12 if "mini" in model else 18 if "fast" in model else 24
-            return max(1, duration_seconds) * per_second
-        if model == WAN_MODEL:
-            return max(1, duration_seconds) * 10
-        return max(1, duration_seconds) * 8
+        client_estimate is ignored for billing — kept only for mismatch logging
+        against the UI display value.
+        """
+        quote = self.pricing.estimateCredits(
+            model_ui_id or model,
+            resolution,
+            duration_seconds,
+        )
+        if quote is not None:
+            if client_estimate is not None:
+                try:
+                    ui_value = float(client_estimate)
+                except (TypeError, ValueError):
+                    ui_value = None
+                if ui_value is not None and abs(ui_value - quote.credits) > 1e-6:
+                    logger.warning(
+                        "UI credit estimate mismatch model={} duration={}s "
+                        "resolution={} ui_credits={} engine_credits={}",
+                        model,
+                        duration_seconds,
+                        resolution,
+                        ui_value,
+                        quote.credits,
+                    )
+            return quote.credits
+
+        logger.error(
+            "Seedance pricing unavailable for model={} resolution={} "
+            "duration={}s — refusing invented rates",
+            model,
+            resolution,
+            duration_seconds,
+        )
+        raise VideoGenerationError(
+            f"Credit pricing is not configured for '{model}' "
+            f"at {resolution}/{duration_seconds}s. "
+            "Add credits_per_second to seedance_pricing.json before generating.",
+            code="pricing_unavailable",
+        )
 
     async def urls_are_accessible(self, urls: list[str]) -> ValidationCheck:
         """HEAD/GET probe public HTTPS URLs (no Kie.ai calls)."""
@@ -210,12 +242,17 @@ class GenerationValidationService:
         resolved_model = self.resolve_model(model)
         resolved = self.resolve_resolution(resolution)
 
-        if resolved_model == V1_PRO_FAST_MODEL:
+        pricing_model = self.pricing.find_model(resolved_model)
+        if pricing_model and pricing_model.get("resolutions"):
+            allowed = {str(item).lower() for item in pricing_model["resolutions"]}
+        elif resolved_model == V1_PRO_FAST_MODEL:
             allowed = V1_PRO_FAST_RESOLUTIONS
+        elif resolved_model in {V1_PRO_MODEL, V1_LITE_MODEL}:
+            allowed = V1_PRO_LITE_RESOLUTIONS
+        elif resolved_model == SEEDANCE_15_PRO_MODEL:
+            allowed = SEEDANCE_15_PRO_RESOLUTIONS
         elif resolved_model in SEEDANCE_2_RESOLUTIONS:
             allowed = SEEDANCE_2_RESOLUTIONS[resolved_model]
-        elif resolved_model == WAN_MODEL:
-            allowed = {"720p", "1080p"}
         else:
             allowed = set()
 
@@ -236,6 +273,32 @@ class GenerationValidationService:
         resolved_model = self.resolve_model(model)
         seconds = self.resolve_duration_seconds(duration_seconds)
 
+        pricing_model = self.pricing.find_model(resolved_model)
+        if pricing_model:
+            dmin = int(pricing_model.get("duration_min") or 1)
+            dmax = int(pricing_model.get("duration_max") or 30)
+            durations = {int(item) for item in (pricing_model.get("durations") or [])}
+            discrete = resolved_model in {
+                V1_PRO_MODEL,
+                V1_LITE_MODEL,
+                V1_PRO_FAST_MODEL,
+            }
+            if discrete and durations and seconds not in durations:
+                return ValidationCheck(
+                    "duration",
+                    False,
+                    f"Duration {seconds}s is not supported for '{resolved_model}'. "
+                    f"Allowed: {', '.join(str(item) for item in sorted(durations))}.",
+                )
+            if seconds < dmin or seconds > dmax:
+                return ValidationCheck(
+                    "duration",
+                    False,
+                    f"Duration {seconds}s is not supported for '{resolved_model}'. "
+                    f"Allowed: {dmin}–{dmax}s.",
+                )
+            return ValidationCheck("duration", True, f"Duration {seconds}s is supported.")
+
         if resolved_model == V1_PRO_FAST_MODEL:
             if seconds not in V1_PRO_FAST_DURATIONS:
                 return ValidationCheck(
@@ -243,19 +306,26 @@ class GenerationValidationService:
                     False,
                     f"Duration {seconds}s is not supported for V1 Pro Fast. Allowed: 5 or 10.",
                 )
+        elif resolved_model in {V1_PRO_MODEL, V1_LITE_MODEL}:
+            if seconds not in V1_PRO_LITE_DURATIONS:
+                return ValidationCheck(
+                    "duration",
+                    False,
+                    f"Duration {seconds}s is not supported for Seedance 1.0. Allowed: 5 or 10.",
+                )
+        elif resolved_model == SEEDANCE_15_PRO_MODEL:
+            if seconds < 4 or seconds > 12:
+                return ValidationCheck(
+                    "duration",
+                    False,
+                    f"Duration {seconds}s is not supported for Seedance 1.5 Pro. Allowed: 4–12.",
+                )
         elif resolved_model in SEEDANCE_2_MODELS:
             if seconds < 4 or seconds > 15:
                 return ValidationCheck(
                     "duration",
                     False,
                     f"Duration {seconds}s is not supported for Seedance 2.x. Allowed: 4–15.",
-                )
-        elif resolved_model == WAN_MODEL:
-            if seconds < 2 or seconds > 15:
-                return ValidationCheck(
-                    "duration",
-                    False,
-                    f"Duration {seconds}s is not supported for Wan 2.7. Allowed: 2–15.",
                 )
 
         return ValidationCheck("duration", True, f"Duration {seconds}s is supported.")
@@ -338,5 +408,9 @@ class GenerationValidationService:
 
 def get_generation_validation_service(
     settings: Settings = Depends(get_settings),
+    pricing: SeedancePricingEngine = Depends(get_seedance_pricing_engine),
 ) -> GenerationValidationService:
-    return GenerationValidationService(settings=settings)
+    return GenerationValidationService(
+        settings=settings,
+        pricing=pricing,
+    )

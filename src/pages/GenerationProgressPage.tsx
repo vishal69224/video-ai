@@ -83,7 +83,7 @@ export function GenerationProgressPage() {
           <div className="flex items-center gap-2 text-sm text-mute">
             <CheckCircle2 className="h-4 w-4 text-accent" />
             {isPolling
-              ? 'Polling backend status every 3 seconds.'
+              ? status?.message || 'Polling backend status every 2.5 seconds.'
               : status?.status === 'completed'
                 ? 'Generation complete. Opening library…'
                 : 'Status updates paused.'}

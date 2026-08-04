@@ -3,21 +3,35 @@ import { ApiError } from '@/services/api'
 import { getVideoStatus, type VideoStatusResponse } from '@/services/video'
 import type { GenerationStep } from '@/types'
 
+/** Mirrors backend STAGE_RANGES order for the progress timeline. */
 export const GENERATION_STAGES = [
   { id: 'queued', label: 'Queued' },
+  { id: 'uploading_images', label: 'Uploading Images' },
   { id: 'analyzing_images', label: 'Analyzing Images' },
   { id: 'generating_prompt', label: 'Generating Prompt' },
-  { id: 'submitting_to_ai', label: 'Submitting To AI' },
+  { id: 'uploading_assets', label: 'Uploading Assets to Kie' },
+  { id: 'submitting_to_kie', label: 'Submitting Generation Request' },
+  { id: 'waiting_queue', label: 'Waiting For Kie Queue' },
   { id: 'rendering', label: 'Rendering' },
   { id: 'finalizing', label: 'Finalizing' },
   { id: 'completed', label: 'Completed' },
 ] as const
 
-const POLL_INTERVAL_MS = 3000
-const MAX_POLL_ATTEMPTS = 200
+/** Map legacy backend stage ids onto the current timeline. */
+const STAGE_ALIASES: Record<string, string> = {
+  submitting_to_ai: 'submitting_to_kie',
+}
+
+const POLL_INTERVAL_MS = 2500
+const MAX_POLL_ATTEMPTS = 240
+
+function normalizeStage(stage: string): string {
+  const normalized = stage.trim().toLowerCase()
+  return STAGE_ALIASES[normalized] ?? normalized
+}
 
 function stageIndex(stage: string): number {
-  const normalized = stage.trim().toLowerCase()
+  const normalized = normalizeStage(stage)
   if (normalized === 'failed') return -1
   const index = GENERATION_STAGES.findIndex((item) => item.id === normalized)
   return index >= 0 ? index : 0
@@ -34,7 +48,7 @@ function buildSteps(stage: string, status: string): GenerationStep[] {
   }
 
   const current = stageIndex(stage)
-  const completedAll = status === 'completed' || stage === 'completed'
+  const completedAll = status === 'completed' || normalizeStage(stage) === 'completed'
 
   return GENERATION_STAGES.map((item, index) => {
     if (completedAll) return { id: item.id, label: item.label, status: 'completed' as const }
@@ -51,12 +65,16 @@ export function useVideoStatus(taskId: string | null, options?: { enabled?: bool
   const [isPolling, setIsPolling] = useState(false)
   const attemptsRef = useRef(0)
   const completedRef = useRef(false)
+  const highestProgressRef = useRef(0)
 
   const poll = useCallback(async () => {
     if (!taskId) return
     try {
       const next = await getVideoStatus(taskId)
-      setStatus(next)
+      // Never let the bar jump backwards if a poll races an older snapshot.
+      const progress = Math.max(highestProgressRef.current, next.progress ?? 0)
+      highestProgressRef.current = progress
+      setStatus({ ...next, progress })
       setError(next.status === 'failed' ? next.error_message || next.message || 'Generation failed' : null)
       if (next.status === 'completed' || next.status === 'failed') {
         completedRef.current = true
@@ -78,6 +96,7 @@ export function useVideoStatus(taskId: string | null, options?: { enabled?: bool
   useEffect(() => {
     completedRef.current = false
     attemptsRef.current = 0
+    highestProgressRef.current = 0
     setStatus(null)
     setError(null)
 

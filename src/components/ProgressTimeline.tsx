@@ -3,6 +3,9 @@ import {
   Check,
   CircleDashed,
   Clapperboard,
+  FileUp,
+  Hourglass,
+  ImageUp,
   LoaderCircle,
   ScanSearch,
   Send,
@@ -16,9 +19,12 @@ import type { GenerationStep } from '@/types'
 
 const STEP_ICONS: LucideIcon[] = [
   CircleDashed,
+  FileUp,
   ScanSearch,
   WandSparkles,
+  ImageUp,
   Send,
+  Hourglass,
   Clapperboard,
   Sparkles,
   Check,
@@ -31,7 +37,7 @@ interface ProgressTimelineProps {
 }
 
 function formatRemaining(ms: number): string {
-  if (ms < 0) return 'Live status from server · updates every 3s'
+  if (ms < 0) return 'Live status from server · updates every 2.5s'
   const totalSeconds = Math.ceil(ms / 1000)
   const minutes = Math.floor(totalSeconds / 60)
   const seconds = totalSeconds % 60

@@ -940,18 +940,31 @@ class KieClient:
 
         return urls
 
-    async def ensure_remote_image_urls(self, image_paths: list[str]) -> list[str]:
+    async def ensure_remote_image_urls(
+        self,
+        image_paths: list[str],
+        *,
+        on_progress: Any | None = None,
+    ) -> list[str]:
         """
         Return image URLs Kie.ai can download.
 
         Local files (and localhost/private URLs) are uploaded via the official
         File Upload API and replaced with the returned downloadUrl.
         Docs: https://docs.kie.ai/file-upload-api/quickstart
+
+        on_progress(index_1based, total) may be sync or async; called before each file.
         """
         self._ensure_configured()
         remote_urls: list[str] = []
+        total = len(image_paths)
 
-        for raw in image_paths:
+        for index, raw in enumerate(image_paths, start=1):
+            if on_progress is not None:
+                result = on_progress(index, total)
+                if asyncio.iscoroutine(result):
+                    await result
+
             normalized = raw.strip().replace("\\", "/")
             if normalized.startswith("http://") or normalized.startswith("https://"):
                 if self._is_publicly_reachable_url(normalized):

@@ -104,8 +104,8 @@ export function VideoGeneratorPage() {
 
       const model = settings ? getModelById(settings.modelId) : undefined
 
-      setPhase('generating_prompt')
-      const generationPromise = generateVideo({
+      setPhase(developmentMode ? 'generating_prompt' : 'processing')
+      const generation = await generateVideo({
         image_paths: imagePaths,
         project_name: trimmedName || undefined,
         model_id: settings?.modelId,
@@ -114,8 +114,6 @@ export function VideoGeneratorPage() {
         duration_seconds: settings?.durationSeconds,
         estimated_credits: settings?.breakdown?.estimatedCredits,
       })
-      setPhase(developmentMode ? 'generating_prompt' : 'submitting_to_ai')
-      const generation = await generationPromise
 
       if (generation.development_mode) {
         setDevPrompt(generation.generated_prompt || generation.prompt || '')
@@ -127,7 +125,7 @@ export function VideoGeneratorPage() {
         throw new ApiError('Generation did not return a task id.', 502, 'missing_task_id')
       }
 
-      setPhase('processing')
+      // Production jobs return immediately; progress page polls live stages.
       persistActiveTask(generation.task_id, trimmedName)
       setActiveTaskId(generation.task_id)
       clearImages()

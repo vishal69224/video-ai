@@ -32,7 +32,9 @@ class VideoTaskRecord:
     duration: str = "0:05"
     resolution: str = "1080 × 1920"
     model: str | None = None
-    credits_used: int | None = None
+    credits_used: int | float | None = None
+    provider_task_id: str | None = None
+    status_message: str | None = None
     created_at: str = field(default_factory=_utc_now)
     updated_at: str = field(default_factory=_utc_now)
     error_message: str | None = None

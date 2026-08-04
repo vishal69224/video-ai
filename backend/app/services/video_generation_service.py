@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,16 +33,23 @@ from app.services.video_store import VideoTaskRecord, video_store
 
 logger = get_logger()
 
-STAGE_PROGRESS = {
-    "queued": 5,
-    "analyzing_images": 15,
-    "generating_prompt": 30,
-    "submitting_to_ai": 45,
-    "rendering": 70,
-    "finalizing": 90,
-    "completed": 100,
-    "failed": 100,
+# Stage → (start%, end%) for smooth progress. Update BEFORE long work starts.
+STAGE_RANGES: dict[str, tuple[int, int]] = {
+    "queued": (5, 5),
+    "uploading_images": (10, 20),
+    "analyzing_images": (20, 35),
+    "generating_prompt": (35, 50),
+    "uploading_assets": (50, 65),
+    "submitting_to_kie": (65, 75),
+    "waiting_queue": (75, 80),
+    "rendering": (80, 95),
+    "finalizing": (95, 99),
+    "completed": (100, 100),
+    "failed": (100, 100),
 }
+
+# Legacy alias used by older call sites / failed markers.
+STAGE_PROGRESS = {stage: bounds[0] for stage, bounds in STAGE_RANGES.items()}
 
 
 @dataclass
@@ -235,8 +243,11 @@ class VideoGenerationService:
         duration_seconds: int | None,
         estimated_credits: float | None,
     ) -> VideoGenerationResponse:
-        """Full production pipeline including Kie.ai + MongoDB persistence."""
-        logger.info("Production Mode active — Kie.ai submission enabled")
+        """
+        Create a job immediately and run the pipeline in the background so the
+        progress page can poll live stage/progress updates.
+        """
+        logger.info("Production Mode active — Kie.ai submission enabled (async job)")
 
         title = (project_name or "").strip() or "Product Film"
         resolved_model = self.validation_service.resolve_model(api_model)
@@ -244,7 +255,6 @@ class VideoGenerationService:
         resolved_seconds = self.validation_service.resolve_duration_seconds(
             duration_seconds
         )
-        # Always price from the centralized table before any Kie call.
         table_credits = self.validation_service.estimate_credits(
             model=resolved_model,
             resolution=resolved_resolution,
@@ -254,43 +264,108 @@ class VideoGenerationService:
         )
         display_duration = self._format_duration(resolved_seconds)
         display_resolution = self._format_resolution(resolved_resolution)
-        pending_task_id = f"pending-{uuid4()}"
+        job_id = f"job-{uuid4()}"
+
         video_store.create(
-            task_id=pending_task_id,
+            task_id=job_id,
             prompt="",
             title=title,
-            image_paths=[],
+            image_paths=list(image_paths),
             image_urls=[],
             status="processing",
             stage="queued",
-            progress=STAGE_PROGRESS["queued"],
+            progress=STAGE_RANGES["queued"][0],
             duration=display_duration,
             resolution=display_resolution,
             model=resolved_model,
             credits_used=table_credits,
         )
+        video_store.update(
+            job_id,
+            status_message="Job queued — starting pipeline…",
+        )
 
+        asyncio.create_task(
+            self._run_production_pipeline(
+                job_id=job_id,
+                image_paths=list(image_paths),
+                api_model=api_model,
+                resolved_model=resolved_model,
+                resolution=resolution,
+                resolved_resolution=resolved_resolution,
+                duration_seconds=duration_seconds,
+                resolved_seconds=resolved_seconds,
+            ),
+            name=f"video-pipeline-{job_id}",
+        )
+
+        return VideoGenerationResponse(
+            success=True,
+            status="processing",
+            task_id=job_id,
+            prompt=None,
+            message="Video generation started. Poll /api/video/status for live progress.",
+            development_mode=False,
+        )
+
+    async def _run_production_pipeline(
+        self,
+        *,
+        job_id: str,
+        image_paths: list[str],
+        api_model: str | None,
+        resolved_model: str,
+        resolution: str | None,
+        resolved_resolution: str,
+        duration_seconds: int | None,
+        resolved_seconds: int,
+    ) -> None:
+        """Background pipeline — updates stage/progress before each long step."""
+        pulse: asyncio.Task[None] | None = None
         try:
-            video_store.update(
-                pending_task_id,
-                stage="analyzing_images",
-                progress=STAGE_PROGRESS["analyzing_images"],
+            self._set_stage(
+                job_id,
+                "uploading_images",
+                message="Preparing uploaded images…",
             )
             validated_paths = self._validate_images(image_paths)
+            total_images = len(validated_paths)
+            for index, path in enumerate(validated_paths, start=1):
+                start, end = STAGE_RANGES["uploading_images"]
+                pct = start + int((end - start) * (index / max(total_images, 1)))
+                self._set_stage(
+                    job_id,
+                    "uploading_images",
+                    progress=pct,
+                    message=f"Preparing image {index}/{total_images}",
+                )
+                await asyncio.sleep(0)  # yield so status polls can read updates
+
             thumbnail_url = self._local_upload_url(validated_paths[0])
             video_store.update(
-                pending_task_id,
+                job_id,
                 image_paths=validated_paths,
                 thumbnail_url=thumbnail_url,
             )
-            logger.info("Image validation completed for {} path(s)", len(validated_paths))
 
-            video_store.update(
-                pending_task_id,
-                stage="generating_prompt",
-                progress=STAGE_PROGRESS["generating_prompt"],
+            self._set_stage(
+                job_id,
+                "analyzing_images",
+                message="Analyzing product images…",
             )
-            logger.info("Prompt generation started")
+            pulse = self._start_progress_pulse(job_id, "analyzing_images")
+            # Hold analyzing long enough for the UI to poll it before prompt work.
+            await asyncio.sleep(1.2)
+            if pulse:
+                pulse.cancel()
+
+            self._set_stage(
+                job_id,
+                "generating_prompt",
+                message="Generating cinematic prompt…",
+            )
+            pulse = self._start_progress_pulse(job_id, "generating_prompt")
+
             try:
                 prompt = await self.prompt_service.generate_prompt(
                     validated_paths,
@@ -299,19 +374,16 @@ class VideoGenerationService:
                     resolution=resolved_resolution,
                 )
             except ImagePromptGenerationError as exc:
-                video_store.update(
-                    pending_task_id,
-                    status="failed",
-                    stage="failed",
-                    progress=STAGE_PROGRESS["failed"],
-                    error_message=exc.message,
-                )
-                raise VideoGenerationError(exc.message, code=exc.code) from exc
+                self._fail_job(job_id, exc.message)
+                return
 
-            logger.info("Prompt generation completed length={}", len(prompt))
-            video_store.update(pending_task_id, prompt=prompt)
+            if pulse:
+                pulse.cancel()
+                pulse = None
 
-            # Validate prompt + settings before any Kie credit spend.
+            video_store.update(job_id, prompt=prompt)
+            logger.info("Prompt generation completed job_id={} length={}", job_id, len(prompt))
+
             pre_checks = self.validation_service.validate_prompt_and_settings(
                 prompt=prompt,
                 model=api_model,
@@ -323,35 +395,41 @@ class VideoGenerationService:
             try:
                 self.validation_service.ensure_valid(pre_checks)
             except VideoGenerationError as exc:
-                video_store.update(
-                    pending_task_id,
-                    status="failed",
-                    stage="failed",
-                    progress=STAGE_PROGRESS["failed"],
-                    error_message=exc.message,
-                )
-                raise
+                self._fail_job(job_id, exc.message)
+                return
 
-            video_store.update(
-                pending_task_id,
-                stage="submitting_to_ai",
-                progress=STAGE_PROGRESS["submitting_to_ai"],
+            self._set_stage(
+                job_id,
+                "uploading_assets",
+                message="Uploading assets to Kie.ai…",
             )
-            # Upload local images to Kie File API so createTask gets a public downloadUrl.
-            logger.info("Uploading {} image(s) to Kie File API", len(validated_paths))
-            try:
-                image_urls = await self.kie_client.ensure_remote_image_urls(validated_paths)
-            except KieGenerationError as exc:
-                video_store.update(
-                    pending_task_id,
-                    status="failed",
-                    stage="failed",
-                    progress=STAGE_PROGRESS["failed"],
-                    error_message=exc.message,
+
+            async def _on_asset_upload(index: int, total: int) -> None:
+                start, end = STAGE_RANGES["uploading_assets"]
+                pct = start + int((end - start) * ((index - 1) / max(total, 1)))
+                self._set_stage(
+                    job_id,
+                    "uploading_assets",
+                    progress=min(end - 1, max(start, pct)),
+                    message=f"Uploading image {index}/{total} to Kie.ai",
                 )
-                raise
-            video_store.update(pending_task_id, image_urls=image_urls)
-            logger.info("Kie-hosted image URLs ready count={}", len(image_urls))
+
+            try:
+                image_urls = await self.kie_client.ensure_remote_image_urls(
+                    validated_paths,
+                    on_progress=_on_asset_upload,
+                )
+            except KieGenerationError as exc:
+                self._fail_job(job_id, exc.message)
+                return
+
+            video_store.update(job_id, image_urls=image_urls)
+            self._set_stage(
+                job_id,
+                "uploading_assets",
+                progress=STAGE_RANGES["uploading_assets"][1],
+                message=f"Uploaded {len(image_urls)} asset(s) to Kie.ai",
+            )
 
             url_check = await self.validation_service.urls_are_accessible(image_urls)
             model_checks = self.validation_service.validate_prompt_and_settings(
@@ -362,22 +440,19 @@ class VideoGenerationService:
                 image_urls=image_urls,
                 require_public_urls=True,
             )
-            # Replace the local-file URL check with the live accessibility probe.
             final_checks = [item for item in model_checks if item.name != "public_image_url"]
             final_checks.append(url_check)
             try:
                 self.validation_service.ensure_valid(final_checks)
             except VideoGenerationError as exc:
-                video_store.update(
-                    pending_task_id,
-                    status="failed",
-                    stage="failed",
-                    progress=STAGE_PROGRESS["failed"],
-                    error_message=exc.message,
-                )
-                raise
+                self._fail_job(job_id, exc.message)
+                return
 
-            logger.info("Calling Kie.ai createTask (Production Mode)")
+            self._set_stage(
+                job_id,
+                "submitting_to_kie",
+                message="Submitting generation request to Kie.ai…",
+            )
             try:
                 kie_task_id = await self.kie_client.generate_video(
                     prompt=prompt,
@@ -387,64 +462,34 @@ class VideoGenerationService:
                     duration_seconds=duration_seconds,
                 )
             except KieGenerationError as exc:
-                video_store.update(
-                    pending_task_id,
-                    status="failed",
-                    stage="failed",
-                    progress=STAGE_PROGRESS["failed"],
-                    error_message=exc.message,
-                )
-                raise
+                self._fail_job(job_id, exc.message)
+                return
             except Exception as exc:  # noqa: BLE001
-                logger.exception("Unexpected Kie.ai failure")
-                message = f"Video generation failed: {exc}"
-                video_store.update(
-                    pending_task_id,
-                    status="failed",
-                    stage="failed",
-                    progress=STAGE_PROGRESS["failed"],
-                    error_message=message,
-                )
-                raise VideoGenerationError(
-                    message,
-                    code="video_generation_failed",
-                ) from exc
+                logger.exception("Unexpected Kie.ai failure job_id={}", job_id)
+                self._fail_job(job_id, f"Video generation failed: {exc}")
+                return
 
-            video_store.rebind_task_id(
-                pending_task_id,
+            # Keep client task_id stable; store provider id for polling.
+            video_store.update(job_id, provider_task_id=kie_task_id)
+            self._set_stage(
+                job_id,
+                "waiting_queue",
+                message="Waiting in Kie.ai queue…",
+            )
+            logger.info(
+                "Kie.ai task submitted job_id={} provider_task_id={}",
+                job_id,
                 kie_task_id,
-                status="processing",
-                stage="rendering",
-                progress=STAGE_PROGRESS["rendering"],
             )
-
-            logger.info("Kie.ai task_id received task_id={}", kie_task_id)
-            return VideoGenerationResponse(
-                success=True,
-                status="processing",
-                task_id=kie_task_id,
-                prompt=prompt,
-                message="Video generation started successfully.",
-                development_mode=False,
-            )
-        except (VideoGenerationError, KieGenerationError):
-            raise
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Unexpected video generation failure")
-            video_store.update(
-                pending_task_id,
-                status="failed",
-                stage="failed",
-                progress=STAGE_PROGRESS["failed"],
-                error_message=str(exc),
-            )
-            raise VideoGenerationError(
-                f"Video generation failed: {exc}",
-                code="video_generation_failed",
-            ) from exc
+            logger.exception("Unexpected pipeline failure job_id={}", job_id)
+            self._fail_job(job_id, f"Video generation failed: {exc}")
+        finally:
+            if pulse and not pulse.done():
+                pulse.cancel()
 
     async def get_status(self, task_id: str) -> VideoStatusResponse:
-        """Return local task state, refreshing from Kie.ai when still processing."""
+        """Return local task state, refreshing from Kie.ai when a provider id exists."""
         record = video_store.get_by_task_id(task_id)
         if record is None:
             raise VideoGenerationError(
@@ -455,23 +500,28 @@ class VideoGenerationService:
         if record.status in {"completed", "failed"}:
             return self._to_status_response(record)
 
+        provider_task_id = (record.provider_task_id or "").strip()
+        if not provider_task_id:
+            # Still in local pipeline — nudge progress within the active stage band.
+            self._nudge_stage_progress(task_id, record.stage)
+            refreshed = video_store.get_by_task_id(task_id) or record
+            return self._to_status_response(refreshed)
+
         try:
-            remote = await self.kie_client.get_task_status(task_id)
+            remote = await self.kie_client.get_task_status(provider_task_id)
         except KieGenerationError as exc:
-            logger.warning("Kie status poll failed task_id={} error={}", task_id, exc.message)
-            return self._to_status_response(
-                record,
-                message=exc.message,
+            logger.warning(
+                "Kie status poll failed job_id={} provider_task_id={} error={}",
+                task_id,
+                provider_task_id,
+                exc.message,
             )
+            return self._to_status_response(record, message=exc.message)
 
         updated = self._apply_kie_status(task_id, remote) or record
-        if (
-            updated.status == "completed"
-            and (updated.video_url or "").strip()
-        ):
+        if updated.status == "completed" and (updated.video_url or "").strip():
             actual_credits = self._extract_credits_used(remote)
             expected_credits = updated.credits_used
-            # Prefer Kie.ai-reported credits whenever present.
             credits = (
                 actual_credits if actual_credits is not None else expected_credits
             )
@@ -490,66 +540,139 @@ class VideoGenerationService:
                     actual_credits,
                 )
             if credits is not None:
-                updated = (
-                    video_store.update(task_id, credits_used=credits) or updated
-                )
+                updated = video_store.update(task_id, credits_used=credits) or updated
             try:
                 await self.library_service.save_completed_from_task(
                     updated,
                     credits_used=credits,
                     model=updated.model,
                 )
-            except Exception:  # noqa: BLE001 — status polling must still succeed
+            except Exception:  # noqa: BLE001
                 logger.exception(
                     "Failed to persist completed video task_id={}",
                     task_id,
                 )
         return self._to_status_response(updated)
 
+    def _set_stage(
+        self,
+        task_id: str,
+        stage: str,
+        *,
+        progress: int | None = None,
+        message: str | None = None,
+    ) -> VideoTaskRecord | None:
+        """Update stage immediately; never decrease progress."""
+        record = video_store.get_by_task_id(task_id)
+        if record is None:
+            return None
+        start, _end = STAGE_RANGES.get(stage, (record.progress, record.progress))
+        next_progress = start if progress is None else progress
+        next_progress = max(int(record.progress), int(next_progress))
+        logger.info(
+            "Progress update job_id={} stage={} progress={}% message={!r}",
+            task_id,
+            stage,
+            next_progress,
+            message,
+        )
+        return video_store.update(
+            task_id,
+            status="processing",
+            stage=stage,
+            progress=next_progress,
+            status_message=message if message is not None else record.status_message,
+            error_message=None,
+        )
+
+    def _fail_job(self, task_id: str, message: str) -> None:
+        video_store.update(
+            task_id,
+            status="failed",
+            stage="failed",
+            progress=100,
+            status_message=message,
+            error_message=message,
+        )
+
+    def _start_progress_pulse(self, task_id: str, stage: str) -> asyncio.Task[None]:
+        """Slowly advance progress inside a stage band during long operations."""
+
+        async def _pulse() -> None:
+            start, end = STAGE_RANGES.get(stage, (0, 0))
+            ceiling = max(start, end - 1)
+            while True:
+                await asyncio.sleep(2.0)
+                record = video_store.get_by_task_id(task_id)
+                if record is None or record.stage != stage:
+                    return
+                if record.progress >= ceiling:
+                    continue
+                video_store.update(
+                    task_id,
+                    progress=min(ceiling, int(record.progress) + 1),
+                )
+
+        return asyncio.create_task(_pulse(), name=f"progress-pulse-{task_id}-{stage}")
+
+    def _nudge_stage_progress(self, task_id: str, stage: str) -> None:
+        """On each status poll, inch progress forward within the active band."""
+        if stage not in STAGE_RANGES or stage in {"queued", "completed", "failed"}:
+            return
+        record = video_store.get_by_task_id(task_id)
+        if record is None or record.stage != stage:
+            return
+        _start, end = STAGE_RANGES[stage]
+        ceiling = max(_start, end - 1)
+        if record.progress >= ceiling:
+            return
+        video_store.update(task_id, progress=min(ceiling, int(record.progress) + 1))
+
     def _apply_kie_status(self, task_id: str, remote: dict[str, Any]) -> VideoTaskRecord | None:
-        """Map Kie.ai recordInfo into local stage/progress fields."""
+        """Map Kie.ai recordInfo into local stage/progress (never regress)."""
         state = str(remote.get("state") or "").strip().lower()
         fail_msg = remote.get("failMsg") or remote.get("fail_msg")
+        record = video_store.get_by_task_id(task_id)
+        current = int(record.progress) if record else 0
+
+        def _bump(stage: str, progress: int, message: str) -> VideoTaskRecord | None:
+            start, end = STAGE_RANGES[stage]
+            target = max(current, min(end, max(start, progress)))
+            return video_store.update(
+                task_id,
+                status="processing",
+                stage=stage,
+                progress=target,
+                status_message=message,
+                error_message=None,
+            )
 
         if state in {"waiting", "queuing", "queueing"}:
-            return video_store.update(
-                task_id,
-                status="processing",
-                stage="queued" if state == "waiting" else "rendering",
-                progress=(
-                    STAGE_PROGRESS["queued"]
-                    if state == "waiting"
-                    else STAGE_PROGRESS["rendering"]
-                ),
-                error_message=None,
-            )
+            start, end = STAGE_RANGES["waiting_queue"]
+            # Creep within 75–80 while queued at provider.
+            target = min(end, max(start, current + 1 if current >= start else start))
+            return _bump("waiting_queue", target, "Waiting in Kie.ai queue…")
 
         if state == "generating":
-            return video_store.update(
-                task_id,
-                status="processing",
-                stage="rendering",
-                progress=STAGE_PROGRESS["rendering"],
-                error_message=None,
-            )
+            start, end = STAGE_RANGES["rendering"]
+            target = min(end - 1, max(start, current + 1 if current >= start else start))
+            return _bump("rendering", target, "Rendering video…")
 
         if state == "success":
             video_url = self._extract_video_url(remote)
-            # Only mark completed (and later persist) when a real video URL exists.
             if not video_url:
-                return video_store.update(
-                    task_id,
-                    status="processing",
-                    stage="finalizing",
-                    progress=STAGE_PROGRESS["finalizing"],
-                    error_message=None,
+                return _bump(
+                    "finalizing",
+                    STAGE_RANGES["finalizing"][0],
+                    "Finalizing video output…",
                 )
             return video_store.update(
                 task_id,
                 status="completed",
                 stage="completed",
-                progress=STAGE_PROGRESS["completed"],
+                progress=100,
                 video_url=video_url,
+                status_message="Video generation completed.",
                 error_message=None,
             )
 
@@ -559,17 +682,22 @@ class VideoGenerationService:
                 task_id,
                 status="failed",
                 stage="failed",
-                progress=STAGE_PROGRESS["failed"],
+                progress=100,
+                status_message=message,
                 error_message=message,
             )
 
-        # Unknown state — keep rendering while provider works.
-        return video_store.update(
-            task_id,
-            status="processing",
-            stage="finalizing" if state in {"successing", "finalizing"} else "rendering",
-            progress=STAGE_PROGRESS.get("finalizing", STAGE_PROGRESS["rendering"]),
-        )
+        if state in {"successing", "finalizing"}:
+            return _bump(
+                "finalizing",
+                STAGE_RANGES["finalizing"][0],
+                "Finalizing video output…",
+            )
+
+        # Unknown provider state — keep advancing render band, never rewind.
+        start, end = STAGE_RANGES["rendering"]
+        target = min(end - 1, max(start, current if current >= start else start))
+        return _bump("rendering", target, "Rendering video…")
 
     @staticmethod
     def _extract_credits_used(remote: dict[str, Any]) -> int | None:
@@ -647,7 +775,7 @@ class VideoGenerationService:
             task_id=record.task_id,
             status=record.status,
             stage=stage,
-            progress=record.progress,
+            progress=int(record.progress),
             prompt=record.prompt or None,
             video_url=record.video_url,
             thumbnail_url=record.thumbnail_url,
@@ -656,6 +784,7 @@ class VideoGenerationService:
             resolution=record.resolution,
             title=record.title,
             message=message
+            or record.status_message
             or (
                 "Video generation completed."
                 if record.status == "completed"

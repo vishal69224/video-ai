@@ -126,7 +126,7 @@ export function ModelSelect({ models, value, onChange, disabled = false }: Model
                           </div>
                           <p className="mt-0.5 text-xs text-mute">{model.description}</p>
                           <p className="mt-1 text-[11px] font-medium text-mute">
-                            {model.provider}
+                            {model.provider_mark ?? 'Provider'}
                             <span className="mx-1.5 text-line">·</span>
                             <span className="text-accent">
                               {exampleCredits(model) != null

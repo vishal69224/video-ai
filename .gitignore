@@ -33,3 +33,7 @@ backend/app/uploads/*
 !backend/app/uploads/.gitkeep
 backend/app/generated/*
 !backend/app/generated/.gitkeep
+
+.env
+.env.*
+!.env.example
